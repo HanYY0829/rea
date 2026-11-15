@@ -41,7 +41,7 @@ jobs:
     outputs:
       checked_out: ${{ steps.checkout.outcome }}
     env:
-      SYNC_MODE: ${{ inputs.mode || vars.REA_SYNC_MODE || 'source' }}
+      SYNC_MODE: ${{ inputs.mode || vars.REA_SYNC_MODE || 'full' }}
       REVIEW_SHA: ${{ inputs.upstream_sha }}
       REVIEW_DIGEST: ${{ inputs.review_digest }}
     steps:
