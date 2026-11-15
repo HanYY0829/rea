@@ -46,13 +46,20 @@ def notify(repo, folder, outcome):
     url = f'https://github.com/{repo}/actions/runs/{os.environ["GITHUB_RUN_ID"]}'
     failure = f'自动同步失败，未视为完整成功。\n\n运行记录：{url}\n\n'
     failure += result.get('error', '查看运行日志及诊断产物。')
-    issue(repo, '<!-- rea-upstream-sync:failure -->', 'REA 上游同步失败，需要处理', failure, failed)
-    if not failed:
-        pending = bool(result.get('pending_paths'))
-        report = folder / 'pending.md'
-        body = report.read_text(encoding='utf-8') if report.exists() else ''
-        issue(repo, '<!-- rea-upstream-sync:review -->', 'REA 上游工作流待审核（源码同步正常）',
-              body + '\n\n运行产物入口：' + url, pending)
+    try:
+        issue(repo, '<!-- rea-upstream-sync:failure -->', 'REA 上游同步失败，需要处理', failure, failed)
+        if not failed:
+            pending = bool(result.get('pending_paths'))
+            report = folder / 'pending.md'
+            body = report.read_text(encoding='utf-8') if report.exists() else ''
+            issue(repo, '<!-- rea-upstream-sync:review -->', 'REA 上游工作流待审核（源码同步正常）',
+                  body + '\n\n运行产物入口：' + url, pending)
+    except RuntimeError as exc:
+        # Issue 功能可由仓库管理员关闭；通知不可用不能把成功的同步误判为失败。
+        if 'HTTP 410' in str(exc) and 'Issues has been disabled' in str(exc):
+            print('仓库 Issues 已关闭；跳过同步通知，保留 Actions 运行结果和诊断产物。')
+            return
+        raise
 
 
 def heartbeat(repo):

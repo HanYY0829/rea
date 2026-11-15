@@ -1,5 +1,7 @@
 import importlib.util
+import os
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -49,6 +51,13 @@ class MaintenanceTests(unittest.TestCase):
             m.heartbeat('owner/repo')
             self.assertIs(api.call_args.args[2]['force'], False)
             self.assertNotIn('refs/heads/main', api.call_args.args[0])
+
+    def test_issues_disabled_does_not_fail_sync_notification(self):
+        error = RuntimeError('gh: Issues has been disabled in this repository. (HTTP 410)')
+        with tempfile.TemporaryDirectory() as temp, \
+                patch.dict(os.environ, {'GITHUB_RUN_ID': '123'}), \
+                patch.object(m, 'issue', side_effect=error):
+            m.notify('owner/repo', Path(temp), 'success')
 
 
 if __name__ == '__main__':

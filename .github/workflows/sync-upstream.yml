@@ -131,6 +131,7 @@ jobs:
 
       - name: 更新故障或审核通知（失败时保留问题，恢复后关闭）
         if: always() && steps.checkout.outcome == 'success'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           PRIOR_STATUS: ${{ job.status }}
@@ -166,6 +167,7 @@ jobs:
           persist-credentials: false
           sparse-checkout: .github/upstream-sync
       - name: 使用独立的低权限令牌报告故障
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
