@@ -1,0 +1,173 @@
+name: Sync upstream REA
+
+on:
+  schedule:
+    # 北京时间每天 03:23，避开整点拥堵；GitHub 定时任务可能延迟。
+    - cron: '23 19 * * *'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'full：完整同步（与网页按钮一致）；source：仅源码；review-workflows：旧审核模式'
+        type: choice
+        options: [full, source, review-workflows]
+        default: full
+      upstream_sha:
+        description: '审核模式必填：待审核报告中的完整上游提交编号'
+        type: string
+        required: false
+      review_digest:
+        description: '审核模式必填：待审核报告中的 64 位审核摘要'
+        type: string
+        required: false
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sync-upstream.yml'
+      - '.github/upstream-sync/**'
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: rea-upstream-sync-main
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'HanYY0829/rea' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      checked_out: ${{ steps.checkout.outcome }}
+    env:
+      SYNC_MODE: ${{ inputs.mode || vars.REA_SYNC_MODE || 'source' }}
+      REVIEW_SHA: ${{ inputs.upstream_sha }}
+      REVIEW_DIGEST: ${{ inputs.review_digest }}
+    steps:
+      - name: 初始化诊断目录
+        run: echo "DIAGNOSTICS=$RUNNER_TEMP/upstream-sync-diagnostics" >> "$GITHUB_ENV"
+
+      - name: 检查完整同步授权配置
+        if: env.SYNC_MODE != 'source'
+        env:
+          CLIENT_ID: ${{ vars.REA_SYNC_CLIENT_ID }}
+          APP_KEY: ${{ secrets.REA_SYNC_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CLIENT_ID" || -z "$APP_KEY" ]]; then
+            echo '::error::尚未配置专用 GitHub App，拒绝应用工作流；日常源码同步不受影响。'
+            exit 1
+          fi
+          if [[ "$SYNC_MODE" == 'review-workflows' ]]; then
+            [[ "$REVIEW_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo '::error::缺少完整审核版本'; exit 1; }
+            [[ "$REVIEW_DIGEST" =~ ^[0-9a-f]{64}$ ]] || { echo '::error::缺少审核摘要'; exit 1; }
+          fi
+
+      - name: 签发仅限本仓库的短期令牌
+        id: app_token
+        if: env.SYNC_MODE != 'source'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.REA_SYNC_CLIENT_ID }}
+          private-key: ${{ secrets.REA_SYNC_APP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: rea
+          permission-contents: write
+          permission-workflows: write
+
+      - name: 检出本仓库主分支完整历史
+        id: checkout
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: true
+          token: ${{ steps.app_token.outputs.token || github.token }}
+
+      - name: 保存可信同步工具并验证回归测试
+        run: |
+          set -euo pipefail
+          mkdir -p "$DIAGNOSTICS" "$RUNNER_TEMP/rea-sync-tools"
+          cp .github/upstream-sync/*.py "$RUNNER_TEMP/rea-sync-tools/"
+          python3 "$RUNNER_TEMP/rea-sync-tools/test_sync.py" -v
+          python3 "$RUNNER_TEMP/rea-sync-tools/test_maintenance.py" -v
+          python3 "$RUNNER_TEMP/rea-sync-tools/test_full_sync.py"
+
+      - name: 拉取上游（限次重试，不运行上游代码）
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/morluto/rea.git
+          for attempt in 1 2 3; do
+            if git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=30 fetch --no-tags upstream main; then
+              exit 0
+            fi
+            sleep "$((attempt * 5))"
+          done
+          echo '::error::三次拉取上游均失败；未修改主分支。'
+          exit 1
+
+      - name: 同步与安全推送
+        id: engine
+        run: |
+          set -euo pipefail
+          if [[ "$SYNC_MODE" == 'full' ]]; then
+            python3 "$RUNNER_TEMP/rea-sync-tools/full_sync.py" --artifacts "$DIAGNOSTICS" --push
+          else
+            python3 "$RUNNER_TEMP/rea-sync-tools/sync.py" \
+              --mode "$SYNC_MODE" --upstream-sha "$REVIEW_SHA" \
+              --review-digest "$REVIEW_DIGEST" --artifacts "$DIAGNOSTICS" --push
+          fi
+
+      - name: 明确显示尚待审核的部分同步状态
+        if: steps.engine.outputs.pending == 'true'
+        run: echo '::warning::源码已同步，但工作流仍待审核；本次不是完整同步。详见运行摘要、诊断产物及待审核问题。'
+
+      - name: 每月更新独立保活分支
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 "$RUNNER_TEMP/rea-sync-tools/maintenance.py" heartbeat --repo "$GITHUB_REPOSITORY"
+
+      - name: 更新故障或审核通知（失败时保留问题，恢复后关闭）
+        if: always() && steps.checkout.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PRIOR_STATUS: ${{ job.status }}
+        run: |
+          set -euo pipefail
+          script="$RUNNER_TEMP/rea-sync-tools/maintenance.py"
+          if [[ ! -f "$script" ]]; then script=.github/upstream-sync/maintenance.py; fi
+          python3 "$script" notify --repo "$GITHUB_REPOSITORY" \
+            --artifacts "$DIAGNOSTICS" --outcome "$PRIOR_STATUS"
+
+      - name: 保存补丁、冲突现场和同步结果
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: upstream-sync-diagnostics
+          path: ${{ env.DIAGNOSTICS }}
+          retention-days: 30
+          if-no-files-found: warn
+
+  notify-early-failure:
+    name: 通知检出前的授权或配置故障
+    needs: sync
+    if: always() && needs.sync.result == 'failure' && needs.sync.outputs.checked_out != 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: main
+          persist-credentials: false
+          sparse-checkout: .github/upstream-sync
+      - name: 使用独立的低权限令牌报告故障
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 .github/upstream-sync/maintenance.py notify --repo "$GITHUB_REPOSITORY" \
+            --artifacts "$RUNNER_TEMP/missing-sync-result" --outcome failure
