@@ -247,6 +247,7 @@ const PATH_SCOPES = {
     "scripts/verify-package-*",
     "scripts/verify-packed-bridge.*",
     "scripts/verify-windows-*.mjs",
+    ".github/actions/windows-cross-compiler/action.yml",
     "scripts/build-windows-native.mjs",
     "scripts/windows-capabilities.mjs",
     "scripts/prepack.mjs",
@@ -813,4 +814,6 @@ export const MANUAL_VERIFIERS = [
   "scripts/verify-packaged-ghidra-windows.mjs",
   "scripts/verify-wasm-artifact.mjs",
   "scripts/verify-packaged-wasm-artifact.mjs",
+  "scripts/lib/ghidra-*-snapshot-e2e.mjs",
+  "scripts/lib/real-ghidra-snapshot-lifecycle.mjs",
 ];
